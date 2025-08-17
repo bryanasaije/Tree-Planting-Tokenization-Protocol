@@ -8,9 +8,14 @@
 (define-constant err-invalid-coordinates (err u102))
 (define-constant err-already-verified (err u103))
 (define-constant err-invalid-token-id (err u104))
+(define-constant err-insufficient-credits (err u105))
+(define-constant err-insufficient-payment (err u106))
+(define-constant err-listing-not-found (err u107))
+(define-constant err-cannot-buy-own-listing (err u108))
 
 (define-data-var last-token-id uint u0)
 (define-data-var verifier-address principal tx-sender)
+(define-data-var last-listing-id uint u0)
 
 (define-map tree-data uint 
   {
@@ -31,6 +36,14 @@
     health-score: uint
   })
 )
+
+(define-map carbon-credit-listings uint {
+    token-id: uint,
+    seller: principal,
+    credits-amount: uint,
+    price-per-credit: uint,
+    active: bool
+  })
 
 (define-public (set-verifier (new-verifier principal))
   (begin
@@ -82,11 +95,13 @@
     (asserts! (> new-height (get height tree)) err-invalid-token-id)
     (asserts! (<= health-score u100) err-invalid-token-id)
     
-    (map-set tree-data token-id (merge tree {
-      height: new-height,
-      health-score: health-score,
-      last-verified: current-height
-    }))
+    (let ((earned-credits (/ new-height u10)))
+      (map-set tree-data token-id (merge tree {
+        height: new-height,
+        health-score: health-score,
+        last-verified: current-height,
+        carbon-credits: (+ (get carbon-credits tree) earned-credits)
+      })))
     
     (match (map-get? verification-history token-id)
       history (map-set verification-history token-id 
@@ -108,6 +123,67 @@
   (begin
     (asserts! (is-eq tx-sender sender) err-owner-only)
     (nft-transfer? tree-nft token-id sender recipient)))
+
+(define-read-only (get-carbon-credit-listing (listing-id uint))
+  (match (map-get? carbon-credit-listings listing-id)
+    listing (ok listing)
+    err-listing-not-found))
+
+(define-public (list-carbon-credits
+    (token-id uint)
+    (credits-amount uint)
+    (price-per-credit uint))
+  (let ((tree (unwrap! (map-get? tree-data token-id) err-not-found))
+        (listing-id (+ (var-get last-listing-id) u1)))
+    (asserts! (is-eq tx-sender (get owner tree)) err-owner-only)
+    (asserts! (>= (get carbon-credits tree) credits-amount) err-insufficient-credits)
+    (asserts! (> price-per-credit u0) err-invalid-token-id)
+    
+    (map-set tree-data token-id (merge tree {
+      carbon-credits: (- (get carbon-credits tree) credits-amount)
+    }))
+    
+    (map-set carbon-credit-listings listing-id {
+      token-id: token-id,
+      seller: tx-sender,
+      credits-amount: credits-amount,
+      price-per-credit: price-per-credit,
+      active: true
+    })
+    
+    (var-set last-listing-id listing-id)
+    (ok listing-id)))
+
+(define-public (buy-carbon-credits (listing-id uint) (credits-to-buy uint))
+  (let ((listing (unwrap! (map-get? carbon-credit-listings listing-id) err-listing-not-found))
+        (total-price (* credits-to-buy (get price-per-credit listing))))
+    (asserts! (get active listing) err-listing-not-found)
+    (asserts! (not (is-eq tx-sender (get seller listing))) err-cannot-buy-own-listing)
+    (asserts! (<= credits-to-buy (get credits-amount listing)) err-insufficient-credits)
+    
+    (try! (stx-transfer? total-price tx-sender (get seller listing)))
+    
+    (if (is-eq credits-to-buy (get credits-amount listing))
+      (map-set carbon-credit-listings listing-id (merge listing { active: false }))
+      (map-set carbon-credit-listings listing-id (merge listing {
+        credits-amount: (- (get credits-amount listing) credits-to-buy)
+      })))
+    
+    (ok total-price)))
+
+(define-public (cancel-listing (listing-id uint))
+  (let ((listing (unwrap! (map-get? carbon-credit-listings listing-id) err-listing-not-found))
+        (tree (unwrap! (map-get? tree-data (get token-id listing)) err-not-found)))
+    (asserts! (is-eq tx-sender (get seller listing)) err-owner-only)
+    (asserts! (get active listing) err-listing-not-found)
+    
+    (map-set tree-data (get token-id listing) (merge tree {
+      carbon-credits: (+ (get carbon-credits tree) (get credits-amount listing))
+    }))
+    
+    (map-set carbon-credit-listings listing-id (merge listing { active: false }))
+    
+    (ok true)))
 
 (define-private (is-valid-coordinates (lat (string-ascii 20)) (long (string-ascii 20)))
   (let ((lat-len (len lat))
