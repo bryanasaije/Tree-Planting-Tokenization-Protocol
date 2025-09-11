@@ -12,10 +12,18 @@
 (define-constant err-insufficient-payment (err u106))
 (define-constant err-listing-not-found (err u107))
 (define-constant err-cannot-buy-own-listing (err u108))
+(define-constant err-insurance-not-found (err u109))
+(define-constant err-claim-already-filed (err u110))
+(define-constant err-insufficient-pool-funds (err u111))
+(define-constant err-tree-too-healthy (err u112))
+(define-constant err-insurance-expired (err u113))
 
 (define-data-var last-token-id uint u0)
 (define-data-var verifier-address principal tx-sender)
 (define-data-var last-listing-id uint u0)
+(define-data-var insurance-pool uint u0)
+(define-data-var last-insurance-id uint u0)
+(define-data-var health-degradation-rate uint u5)
 
 (define-map tree-data uint 
   {
@@ -43,6 +51,20 @@
     credits-amount: uint,
     price-per-credit: uint,
     active: bool
+  })
+
+(define-map tree-insurance uint {
+    token-id: uint,
+    owner: principal,
+    coverage-amount: uint,
+    premium-paid: uint,
+    expiry-block: uint,
+    claim-filed: bool
+  })
+
+(define-map health-snapshots uint {
+    last-check-block: uint,
+    last-health-score: uint
   })
 
 (define-public (set-verifier (new-verifier principal))
@@ -184,6 +206,106 @@
     (map-set carbon-credit-listings listing-id (merge listing { active: false }))
     
     (ok true)))
+
+(define-public (purchase-insurance 
+    (token-id uint)
+    (coverage-amount uint)
+    (duration-blocks uint))
+  (let ((tree (unwrap! (map-get? tree-data token-id) err-not-found))
+        (insurance-id (+ (var-get last-insurance-id) u1))
+        (premium (calculate-premium coverage-amount duration-blocks))
+        (expiry-block (+ stacks-block-height duration-blocks)))
+    (asserts! (is-eq tx-sender (get owner tree)) err-owner-only)
+    (asserts! (> coverage-amount u0) err-invalid-token-id)
+    
+    (try! (stx-transfer? premium tx-sender (as-contract tx-sender)))
+    (var-set insurance-pool (+ (var-get insurance-pool) premium))
+    
+    (map-set tree-insurance insurance-id {
+      token-id: token-id,
+      owner: tx-sender,
+      coverage-amount: coverage-amount,
+      premium-paid: premium,
+      expiry-block: expiry-block,
+      claim-filed: false
+    })
+    
+    (map-set health-snapshots token-id {
+      last-check-block: stacks-block-height,
+      last-health-score: (get health-score tree)
+    })
+    
+    (var-set last-insurance-id insurance-id)
+    (ok insurance-id)))
+
+(define-public (file-health-claim (insurance-id uint))
+  (let ((insurance (unwrap! (map-get? tree-insurance insurance-id) err-insurance-not-found))
+        (tree (unwrap! (map-get? tree-data (get token-id insurance)) err-not-found))
+        (snapshot (unwrap! (map-get? health-snapshots (get token-id insurance)) err-not-found)))
+    (asserts! (is-eq tx-sender (get owner insurance)) err-owner-only)
+    (asserts! (not (get claim-filed insurance)) err-claim-already-filed)
+    (asserts! (<= stacks-block-height (get expiry-block insurance)) err-insurance-expired)
+    
+    (let ((current-health (calculate-current-health (get token-id insurance) snapshot))
+          (coverage (get coverage-amount insurance)))
+      (asserts! (<= current-health u30) err-tree-too-healthy)
+      (asserts! (>= (var-get insurance-pool) coverage) err-insufficient-pool-funds)
+      
+      (try! (as-contract (stx-transfer? coverage tx-sender (get owner insurance))))
+      (var-set insurance-pool (- (var-get insurance-pool) coverage))
+      
+      (map-set tree-insurance insurance-id (merge insurance {
+        claim-filed: true
+      }))
+      
+      (ok coverage))))
+
+(define-read-only (get-insurance-details (insurance-id uint))
+  (match (map-get? tree-insurance insurance-id)
+    insurance (ok insurance)
+    err-insurance-not-found))
+
+(define-private (calculate-current-health (token-id uint) (snapshot {last-check-block: uint, last-health-score: uint}))
+  (let ((blocks-passed (- stacks-block-height (get last-check-block snapshot)))
+        (degradation (* blocks-passed (var-get health-degradation-rate)))
+        (current-health (if (> degradation (get last-health-score snapshot))
+                          u0
+                          (- (get last-health-score snapshot) degradation))))
+    current-health))
+
+(define-public (update-health-snapshot (token-id uint))
+  (let ((tree (unwrap! (map-get? tree-data token-id) err-not-found)))
+    (map-set health-snapshots token-id {
+      last-check-block: stacks-block-height,
+      last-health-score: (get health-score tree)
+    })
+    (ok true)))
+
+(define-read-only (check-tree-health (token-id uint))
+  (match (map-get? health-snapshots token-id)
+    snapshot (ok (calculate-current-health token-id snapshot))
+    err-not-found))
+
+(define-public (fund-insurance-pool (amount uint))
+  (begin
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (var-set insurance-pool (+ (var-get insurance-pool) amount))
+    (ok amount)))
+
+(define-private (calculate-premium (coverage-amount uint) (duration-blocks uint))
+  (let ((base-rate u1000)
+        (duration-factor (/ duration-blocks u1000))
+        (coverage-factor (/ coverage-amount u1000000)))
+    (+ base-rate (* duration-factor coverage-factor))))
+
+(define-read-only (get-insurance-pool-balance)
+  (ok (var-get insurance-pool)))
+
+(define-public (set-health-degradation-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set health-degradation-rate new-rate)
+    (ok new-rate)))
 
 (define-private (is-valid-coordinates (lat (string-ascii 20)) (long (string-ascii 20)))
   (let ((lat-len (len lat))
