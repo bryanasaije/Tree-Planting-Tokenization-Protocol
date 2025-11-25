@@ -45,27 +45,28 @@ genesis:
       balance: "100000000000000"
       sbtc-balance: "1000000000"
   contracts:
-    - genesis
-    - lockup
-    - bns
-    - cost-voting
     - costs
     - pox
-    - costs-2
     - pox-2
-    - costs-3
     - pox-3
     - pox-4
-    - signers
-    - signers-voting
-    - costs-4
+    - lockup
+    - costs-2
+    - costs-3
+    - cost-voting
+    - bns
 plan:
   batches:
     - id: 0
       transactions:
         - emulated-contract-publish:
+            contract-name: tree-planting-tokenization-protocol
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "..\\contracts\\Tree-Planting-Tokenization-Protocol.clar"
+            clarity-version: 3
+        - emulated-contract-publish:
             contract-name: tree-tokenization
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/tree-tokenization.clar
+            path: "contracts\\tree-tokenization.clar"
             clarity-version: 3
       epoch: "3.1"
